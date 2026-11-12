@@ -32,10 +32,9 @@ class MelParams:
 DEFAULT_MEL = MelParams()
 
 # Mean log-mel of a window below which there is nothing to match. Normalising near-silence
-# turns its residual spectrum shape into scores of 0.5-0.6 against every clip, so such windows
-# score NO_SCORE instead. In a loopback capture -20 is about -47 dBFS RMS; true silence sits at
-# -30 to -40 and the quietest real bite seen so far at about -7.
-SILENCE_LEVEL_DB = -20.0
+# turns its residual spectrum shape into misleading matches. Quiet real splashes can have
+# mean log-mel levels below -20 dB, so keep those while still rejecting digital silence.
+SILENCE_LEVEL_DB = -30.0
 
 
 def _hz_to_mel(f: np.ndarray | float) -> np.ndarray | float:

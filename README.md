@@ -30,6 +30,19 @@ A fishing bot for **World of Warcraft: Forever**, successor to the 2019
 game window for the built-in interact icon over your bobber, listens to the game's own splash
 sound for the bite, and presses your Interact key.
 
+Choose **World of Warcraft only** to hear the game without browser or other app audio.
+
+For a one-button fishing addon, select **Addon: gear + sound + one key** in Setup,
+click the Interact key field and press the addon's key (including NumPad 0), then
+save the keys. Start the bot and focus WoW. It presses the addon key to begin,
+waits for the gear icon, listens for a splash and presses the configured key once;
+it does not claim that the catch succeeded. The original automatic cast
+loop remains available as **Classic**. The sound threshold can be calibrated
+with the 60-second bite check; an excessively low threshold can trigger on other sounds.
+If no bite is detected, addon mode casts again after the configured 30-second cast
+timeout plus a 5-second grace period. If the gear icon is not found for 8 seconds,
+it casts again sooner.
+
 > [!NOTE]
 > 🎉 **Announcement** This was my very first Python project but, surprisingly, my most popular repo on GitHub. 
 > When I originally released this for WoW Classic, I had no idea it would get this much attention. I left this

@@ -51,6 +51,28 @@ def _ranked(m: IconMatch) -> float:
     return m.score if m.gold >= GOLD_MIN else NO_MATCH
 
 
+def quick_calibrate(
+    frame_bgr: np.ndarray, templates: Sequence[IconTemplate], size: int, *, match_width: int = 1920
+) -> Calibration | None:
+    """Verify a previously measured size, including off-scale shape checks."""
+    if size < MIN_SIZE:
+        return None
+    match = IconMatcher(template_for_size(templates, size), match_width).match(frame_bgr)
+    if match.gold < GOLD_MIN or match.score < MIN_VALID_SCORE:
+        return None
+    h, w = frame_bgr.shape[:2]
+    region = Region.around(match.x, match.y, w, h, 0.03)
+    off = [
+        IconMatcher(template_for_size(templates, max(1, round(size * factor))), match_width)
+        .match(frame_bgr, region).score
+        for factor in OFF_SCALE
+    ]
+    prominence = match.score - max(off)
+    cal = Calibration(size, template_for_size(templates, size).native_size, match.score,
+                      match.x, match.y, match.gold, prominence)
+    return cal if cal.valid else None
+
+
 def calibrate_icon_scale(
     frame_bgr: np.ndarray,
     templates: Sequence[IconTemplate],

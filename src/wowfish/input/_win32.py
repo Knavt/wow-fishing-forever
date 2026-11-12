@@ -74,4 +74,5 @@ class Win32InputDevice:
     def is_game_focused(self, window: WindowRef) -> bool | None:
         if window.handle is None:
             return None
-        return int(self._u.GetForegroundWindow()) == int(window.handle)
+        foreground = self._u.GetForegroundWindow()
+        return foreground is not None and int(foreground) == int(window.handle)

@@ -15,6 +15,9 @@ from wowfish.gui.presenter import (
 )
 
 CHECKLIST = (
+    "Addon mode: select the addon button as Interact key, press Start, return to the game,\n"
+    "and return to the game. The bot presses the key, finds the gear and listens for a splash.\n"
+    "Classic mode uses the gear icon and separate cast/interact keys.\n\n"
     "In the game, before starting:\n"
     "  1. Stand at the water with Fishing on an action bar key (the cast key below).\n"
     "  2. Bind Interact With Target (Options > Keybindings > Targeting) to the interact key.\n"
@@ -39,18 +42,34 @@ class SetupPage:
         f = self.frame
         tb.Label(f, text=CHECKLIST, justify="left").pack(anchor="w", pady=(0, 10))
 
+        mode_row = tb.Frame(f)
+        mode_row.pack(fill="x", pady=4)
+        tb.Label(mode_row, text="Mode").pack(side="left")
+        self.mode = tb.Combobox(
+            mode_row, values=["Addon: gear + sound + one key", "Classic: cast + icon"],
+            state="readonly", width=32,
+        )
+        self.mode.current(0 if presenter.cfg.game.mode == "addon" else 1)
+        self.mode.pack(side="left", padx=6)
+        self.mode.bind("<<ComboboxSelected>>", self._save_mode)
+
         keys_row = tb.Labelframe(f, text="Keys", padding=8)
         keys_row.pack(fill="x", pady=4)
         tb.Label(keys_row, text="Cast key").grid(row=0, column=0, sticky="w")
         self.cast = tb.Entry(keys_row, width=8)
         self.cast.insert(0, presenter.cfg.game.cast_key)
         self.cast.grid(row=0, column=1, padx=6)
+        self.cast.bind("<KeyPress>", self._capture_key)
         tb.Label(keys_row, text="Interact key").grid(row=0, column=2, sticky="w")
         self.interact = tb.Entry(keys_row, width=8)
         self.interact.insert(0, presenter.cfg.game.interact_key)
         self.interact.grid(row=0, column=3, padx=6)
+        self.interact.bind("<KeyPress>", self._capture_key)
         tb.Button(keys_row, text="Save keys", command=self._save_keys, bootstyle="secondary").grid(
             row=0, column=4, padx=6
+        )
+        tb.Button(keys_row, text="NumPad 0", command=self._set_numpad_zero).grid(
+            row=1, column=2, columnspan=2, pady=(6, 0)
         )
         self.keys_note = tb.Label(keys_row, text="")
         self.keys_note.grid(row=0, column=5, sticky="w")
@@ -122,6 +141,38 @@ class SetupPage:
         self._photo = None
 
     # -- actions ----------------------------------------------------------------------------
+
+    def _capture_key(self, event: Any) -> str:
+        from wowfish.input.keys import is_supported_key
+
+        sym = str(event.keysym).lower()
+        if getattr(event, "keycode", None) in range(96, 106):
+            sym = f"num{event.keycode - 96}"
+        keypad = {"insert": 0, "end": 1, "down": 2, "next": 3, "left": 4,
+                  "begin": 5, "right": 6, "home": 7, "up": 8, "prior": 9}
+        if sym.startswith("kp_"):
+            part = sym[3:]
+            sym = f"num{keypad.get(part, part)}"
+        aliases = {"return": "enter", "esc": "escape", "backslash": "\\",
+                   "minus": "-", "equal": "=", "bracketleft": "[", "bracketright": "]",
+                   "semicolon": ";", "apostrophe": "'", "comma": ",", "period": ".",
+                   "slash": "/", "grave": "`"}
+        sym = aliases.get(sym, sym)
+        if is_supported_key(sym):
+            event.widget.delete(0, "end")
+            event.widget.insert(0, sym)
+            self.keys_note.configure(text="Press Save keys")
+        else:
+            self.keys_note.configure(text=f"Unsupported key: {event.keysym}")
+        return "break"
+
+    def _set_numpad_zero(self) -> None:
+        self.interact.delete(0, "end")
+        self.interact.insert(0, "num0")
+        self.keys_note.configure(text="NumPad 0 selected. Press Save keys")
+
+    def _save_mode(self, _event: object = None) -> None:
+        self.p.save_mode("addon" if self.mode.current() == 0 else "classic")
 
     def _save_keys(self) -> None:
         try:

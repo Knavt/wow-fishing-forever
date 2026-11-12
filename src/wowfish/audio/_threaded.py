@@ -26,34 +26,40 @@ class ThreadedSource:
         self._frames = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._ready = threading.Event()
         self.error: BaseException | None = None
         self._thread = threading.Thread(target=self._run, name="wowfish-audio", daemon=True)
 
     def __enter__(self) -> ThreadedSource:
-        self.inner.__enter__()
         self._thread.start()
+        if not self._ready.wait(10.0):
+            raise RuntimeError("audio capture did not start within 10 seconds")
+        if self.error is not None:
+            raise RuntimeError(f"audio capture failed to start: {self.error}") from self.error
         return self
 
     def __exit__(self, *exc: object) -> None:
         self._stop.set()
         self._thread.join(2.0)
-        self.inner.__exit__(*exc)
 
     def _run(self) -> None:
         try:
-            while not self._stop.is_set():
-                samples = np.asarray(self.inner.read(self.block), dtype=np.float32)
-                if not len(samples):
-                    continue
-                with self._lock:
-                    self._chunks.append(samples)
-                    self._frames += len(samples)
-                    while self._frames > self._max_frames and len(self._chunks) > 1:
-                        self._frames -= len(self._chunks.popleft())
-                if getattr(self.inner, "exhausted", False):
-                    break
+            with self.inner:
+                self._ready.set()
+                while not self._stop.is_set():
+                    samples = np.asarray(self.inner.read(self.block), dtype=np.float32)
+                    if not len(samples):
+                        continue
+                    with self._lock:
+                        self._chunks.append(samples)
+                        self._frames += len(samples)
+                        while self._frames > self._max_frames and len(self._chunks) > 1:
+                            self._frames -= len(self._chunks.popleft())
+                    if getattr(self.inner, "exhausted", False):
+                        break
         except BaseException as e:  # surface on the next read instead of dying silently
             self.error = e
+            self._ready.set()
 
     def read(self, n_frames: int) -> np.ndarray:
         """Up to n_frames of buffered audio, immediately; empty when nothing has arrived."""

@@ -54,9 +54,13 @@ def describe(event: ev.Event) -> str:
             return f"No splash within {s:g} s; {detail}; recasting"
         case ev.Timeout(what="bite", after_s=s):
             return f"No splash within {s:g} s; recasting"
-        case ev.Listening(best_clip=clip, best_score=score, threshold=threshold):
+        case ev.Listening(best_clip=clip, best_score=score, threshold=threshold, level_dbfs=level):
             which = f" ({clip})" if clip else ""  # no clip: everything so far was silence
-            return f"Best match so far {max(score, 0.0):.2f}{which}; threshold {threshold:.2f}"
+            volume = f"; audio {level:.0f} dBFS" if level is not None else ""
+            return (
+                f"Best match so far {max(score, 0.0):.2f}{which}; "
+                f"threshold {threshold:.2f}{volume}"
+            )
         case ev.Timeout(after_s=s):
             return f"Bobber still there {s:g} s after Interact; recasting"
         case ev.Paused(reason=reason):
@@ -209,6 +213,13 @@ class Presenter:
         )
         self.reload()
 
+    def save_mode(self, mode: str) -> None:
+        if mode not in ("addon", "classic"):
+            raise ValueError("unknown fishing mode")
+        self.reload()
+        save_config(replace(self.cfg, game=replace(self.cfg.game, mode=mode)))
+        self.reload()
+
     def audio_devices(self) -> list[Any]:
         """The game's own audio first (default), then the loopback monitors.
 
@@ -320,7 +331,7 @@ class Presenter:
         self._thread.start()
         self.state = State.IDLE.name
         self.did = "Started"
-        self.next = "Casting"
+        self.next = "Listening for a splash" if self.cfg.game.mode == "addon" else "Casting"
 
     def stop(self) -> None:
         if self._thread is not None:
@@ -377,6 +388,11 @@ class Presenter:
                 self.state, self.did, self.next = state.name, did, nxt
             case ev.IconFound(thumbnail=thumb, box=box):
                 self.thumbnail_png = image.bgr_to_png_bytes(image.with_box(thumb, box))
+                if self.cfg.game.mode != "addon":
+                    self.trace = ScoreTrace(
+                        t0=event.t, threshold=self.trace.threshold, version=self.trace.version + 1
+                    )
+            case ev.KeyPressed(why="cast") if self.cfg.game.mode == "addon":
                 self.trace = ScoreTrace(
                     t0=event.t, threshold=self.trace.threshold, version=self.trace.version + 1
                 )
@@ -387,7 +403,14 @@ class Presenter:
                 self.trace.timed_out = True
                 self.trace.version += 1
             case ev.Stats():
-                self.stats = event.as_line()
+                if self.cfg.game.mode == "addon":
+                    m, s = divmod(int(event.elapsed_s), 60)
+                    self.stats = (
+                        f"Bites detected / key presses: {event.bites_heard}, "
+                        f"{m:02d}:{s:02d} (catch not verified)"
+                    )
+                else:
+                    self.stats = event.as_line()
             case ev.Paused(reason=reason):
                 self._before_pause = (self.state, self.did, self.next)
                 self.state, self.did, self.next = State.PAUSED.name, f"Paused: {reason}", "Waiting"

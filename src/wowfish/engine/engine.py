@@ -7,12 +7,14 @@ import queue
 import random
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+from loguru import logger
 
 from wowfish.audio import AudioChunk
 from wowfish.audio._threaded import ThreadedSource
@@ -41,6 +43,8 @@ LISTEN_EVERY_S = 2.0  # while waiting for the splash, say what is heard this oft
 SCORES_EVERY_S = 0.1  # ...and send each clip's peak score this often, for the GUI's graph
 SLEEP_SLICE_S = 0.1
 RESWEEP_AFTER_TIMEOUTS = 2  # icon timeouts in a row before the next cast measures the icon again
+ADDON_RECAST_GRACE_S = 5.0
+ADDON_ICON_TIMEOUT_S = 8.0
 
 
 class FishingEngine:
@@ -98,6 +102,7 @@ class FishingEngine:
         self._stop = False
         self._resume_state = State.IDLE
         self._t_cast = 0.0
+        self._t_icon_search = 0.0
         self._t_interact = 0.0
         self._icon_xy: tuple[int, int] | None = None
         self._icon_size = 0
@@ -109,6 +114,11 @@ class FishingEngine:
         self._last_listen = 0.0
         self._last_scores_sent = 0.0
         self._best_heard: tuple[str, float] = ("", -1.0)  # best clip score since the icon was found
+        self._vision_executor: ThreadPoolExecutor | None = None
+        self._vision_future: Future[Any] | None = None
+        self._cast_generation = 0
+        self._vision_generation = 0
+        self._pending_bite: tuple[Any, float] | None = None
 
     # -- public ------------------------------------------------------------------------------
 
@@ -122,6 +132,8 @@ class FishingEngine:
                 while self.state is not State.STOPPED:
                     self.step()
         finally:
+            if self._vision_executor is not None:
+                self._vision_executor.shutdown(wait=False, cancel_futures=True)
             self.capturer.close()
             close_input = getattr(self.input, "close", None)  # e.g. a Wayland virtual keyboard
             if close_input is not None:
@@ -143,6 +155,7 @@ class FishingEngine:
         try:
             self._step(now)
         except Exception as e:  # a collaborator broke; say so and stop rather than spin
+            logger.exception("Fishing engine failed")
             self._emit(ev.Error(self._t(), f"{type(e).__name__}: {e}"))
             self._finish("error")
 
@@ -160,9 +173,14 @@ class FishingEngine:
             return
         if self.state is State.PAUSED:
             self.state = self._resume_state
+            if self.cfg.game.mode == "addon":
+                self.detector.reset()
             self._emit(ev.Resumed(self._t(), self.state))
 
         chunks = self._drain_audio(now)
+        if self.cfg.game.mode == "addon":
+            self._addon_step(now, chunks)
+            return
         bites = []
         if self.state is State.WAIT_BITE:
             for chunk in chunks:
@@ -179,6 +197,130 @@ class FishingEngine:
         elif self.state is State.INTERACT:
             self._after_interact(now)
         self._maybe_stats(now)
+
+    def _addon_step(self, now: float, chunks: list[AudioChunk]) -> None:
+        if self.state is State.IDLE:
+            self._sweeping = True
+            self._t_cast = now
+            self._t_icon_search = now
+            self._cast_generation += 1
+            self.detector.reset()
+            self._pending_bite = None
+            self._best_heard = ("", -1.0)
+            self._press(self.cfg.game.interact_key, "cast")
+            self._change(
+                State.CASTING, "Started fishing with the addon", "Looking for the gear icon"
+            )
+            return
+        if self.state is State.INTERACT:
+            if now - self._t_interact >= 2.0:
+                self._icon_xy = None
+                if self.search is not None:
+                    self.search.reset()
+                self._press(self.cfg.game.interact_key, "cast")
+                self._t_cast = now
+                self._t_icon_search = now
+                self._cast_generation += 1
+                self.detector.reset()
+                self._pending_bite = None
+                self._best_heard = ("", -1.0)
+                self._change(
+                    State.CASTING, "Pressed the addon key", "Looking for the next gear icon"
+                )
+            self._sleep(0.03)
+            return
+        bites = []
+        for chunk in chunks:
+            bites.extend(self.detector.feed(chunk))
+        self._note_scores()
+        self._send_scores(now, flush=bool(bites))
+        if self.state is State.CASTING:
+            if bites:
+                self._pending_bite = (bites[0], now)
+            if now - self._t_cast >= self.cfg.run.cast_timeout_s + ADDON_RECAST_GRACE_S:
+                self._addon_timeout_recast(now)
+                return
+            if now - self._t_icon_search >= ADDON_ICON_TIMEOUT_S:
+                self._addon_timeout_recast(now, missing_icon=True)
+                return
+            self._addon_acquire(now)
+            if self.state is State.CASTING:
+                self._sleep(0.01)
+                return
+            if self._pending_bite is not None:
+                pending, heard_at = self._pending_bite
+                if now - heard_at <= 1.5 and not bites:
+                    bites = [pending]
+                self._pending_bite = None
+        if bites and self.input.is_game_focused(self.window) is not False:
+            bite = bites[0]
+            self.stats = replace(self.stats, bites_heard=self.stats.bites_heard + 1)
+            self._emit(ev.BiteHeard(self._t(), bite.clip, float(bite.score)))
+            self._press(self.cfg.game.interact_key, "bite")
+            self._t_interact = now
+            self._change(State.INTERACT, f"Heard splash and pressed {self.cfg.game.interact_key}",
+                         "Waiting for the addon")
+        else:
+            if now - self._t_cast >= self.cfg.run.cast_timeout_s + ADDON_RECAST_GRACE_S:
+                self._addon_timeout_recast(now)
+                return
+            seen = self._track(now)
+            if seen is False and self._misses >= self.lost_after:
+                self._icon_xy = None
+                if self.search is not None:
+                    self.search.reset()
+                self._t_icon_search = now
+                self._change(State.CASTING, "Gear icon lost", "Looking for the bobber")
+        self._maybe_stats(now)
+        self._sleep(0.01)
+
+    def _addon_timeout_recast(self, now: float, *, missing_icon: bool = False) -> None:
+        what = "icon" if missing_icon else "bite"
+        limit = (
+            ADDON_ICON_TIMEOUT_S if missing_icon
+            else self.cfg.run.cast_timeout_s + ADDON_RECAST_GRACE_S
+        )
+        self._emit(ev.Timeout(self._t(), what, limit))
+        self._press(self.cfg.game.interact_key, "cast")
+        self._t_cast = now
+        self._t_icon_search = now
+        self._cast_generation += 1
+        self._icon_xy = None
+        self._misses = 0
+        if self.search is not None:
+            self.search.reset()
+        self.detector.reset()
+        self._pending_bite = None
+        self._best_heard = ("", -1.0)
+        reason = "No gear icon; cast again" if missing_icon else "No bite; cast again"
+        self._change(State.CASTING, reason, "Looking for the gear icon")
+
+    def _addon_acquire(self, now: float) -> None:
+        if self._vision_future is None:
+            frame = self.capturer.grab()
+            if self._vision_executor is None:
+                self._vision_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="wowfish-vision"
+                )
+            self._vision_future = self._vision_executor.submit(
+                self._calibrate, frame, match_width=self.cfg.vision.match_width
+            )
+            self._vision_generation = self._cast_generation
+            self._vision_frame = frame
+            return
+        if not self._vision_future.done():
+            return
+        cal = self._vision_future.result()
+        self._vision_future = None
+        if self._vision_generation != self._cast_generation:
+            return
+        if cal.valid:
+            self._use_calibration(cal)
+            self._icon_timeouts = 0
+            self._found(
+                self._vision_frame, IconMatch(cal.score, cal.x, cal.y, cal.icon_size_px, cal.gold)
+            )
+            return
 
     def _cast(self, now: float) -> None:
         if self._find_window is not None:
@@ -208,14 +350,14 @@ class FishingEngine:
 
     def _acquire(self, now: float) -> None:
         frame = self.capturer.grab()
-        if self.search is not None:  # fast path: the saved or last measured size
+        if self.search is not None and self.cfg.game.mode != "addon":
             _, m = self.search.step(frame)
             if m.accepted(self.threshold):
                 self._icon_timeouts = 0
                 self._sweeping = False
                 self._found(frame, m)
                 return
-        if self._sweeping or self.search is None:
+        if self.cfg.game.mode == "addon" or self._sweeping or self.search is None:
             cal = self._calibrate(frame, match_width=self.cfg.vision.match_width)
             if cal.valid:
                 self._use_calibration(cal)
@@ -223,6 +365,8 @@ class FishingEngine:
                 self._found(frame, IconMatch(cal.score, cal.x, cal.y, cal.icon_size_px, cal.gold))
                 return
         if now - self._t_cast > self.cfg.run.icon_timeout_s:
+            if self.cfg.game.mode == "addon":
+                return
             self._emit(ev.Timeout(self._t(), "icon", self.cfg.run.icon_timeout_s))
             self._icon_timeouts += 1
             if self._icon_timeouts >= RESWEEP_AFTER_TIMEOUTS:
@@ -244,8 +388,10 @@ class FishingEngine:
         self._last_box_grab = self._clock()  # the full frame just confirmed it; look again later
         thumb, box = _thumbnail(frame, m.x, m.y, m.size)
         self._emit(ev.IconFound(self._t(), thumb, box, float(m.score), int(m.size), (m.x, m.y)))
-        self.detector.reset()
-        self._best_heard = ("", -1.0)
+        if self.cfg.game.mode != "addon":
+            self.detector.reset()
+        if self.cfg.game.mode != "addon":
+            self._best_heard = ("", -1.0)
         self._last_listen = self._last_scores_sent = self._clock()
         self._change(
             State.WAIT_BITE,
@@ -381,7 +527,8 @@ class FishingEngine:
         if now - self._last_listen >= LISTEN_EVERY_S:
             self._last_listen = now
             clip, score = self._best_heard
-            self._emit(ev.Listening(self._t(), clip, score, self._bite_threshold()))
+            level = getattr(self.detector, "level_dbfs", None)
+            self._emit(ev.Listening(self._t(), clip, score, self._bite_threshold(), level))
         if now - self._last_stats >= STATS_EVERY_S:
             self._emit_stats()
 
@@ -497,6 +644,38 @@ def build_engine(
         raise RuntimeError(f"no window titled {title!r}; is the game running?")
     templates = load_icon_templates()
 
+    calibration_failures = 0
+    known_icon_size = cfg.vision.icon_size_px
+
+    def calibrate_addon(frame: np.ndarray, *, match_width: int) -> Any:
+        from wowfish.vision.calibrate import PROBE_SIZES, calibrate_icon_scale, quick_calibrate
+
+        nonlocal calibration_failures, known_icon_size
+        result = quick_calibrate(frame, templates, known_icon_size, match_width=match_width)
+        if result is not None:
+            calibration_failures = 0
+            return result
+        # Search the expected icon scale first. A full 110-size sweep can block listening
+        # for many seconds at high resolution, long enough to miss a bite.
+        hint = cfg.vision.icon_native_size or cfg.vision.icon_size_px
+        if hint <= 0 or calibration_failures >= 3:
+            calibration_failures = 0
+            result = calibrate_icon_scale(frame, templates, match_width=match_width)
+            if result.valid:
+                known_icon_size = result.icon_size_px
+            return result
+        low = max(18, int(hint * 0.65))
+        high = min(127, max(low + 1, int(hint * 1.55)))
+        probes = tuple(s for s in PROBE_SIZES if low <= s <= high)
+        result = calibrate_icon_scale(
+            frame, templates, sizes=range(low, high + 1), match_width=match_width,
+            probe_sizes=probes or (low, high), anchors=1,
+        )
+        calibration_failures = 0 if result.valid else calibration_failures + 1
+        if result.valid:
+            known_icon_size = result.icon_size_px
+        return result
+
     def matcher_factory(size: int) -> IconMatcher:
         return IconMatcher(template_for_size(templates, size), cfg.vision.match_width)
 
@@ -528,6 +707,7 @@ def build_engine(
         input_device=get_input_device(window),
         audio_source=audio,
         detector=detector,
+        calibrate=calibrate_addon if cfg.game.mode == "addon" else None,
         matcher_factory=matcher_factory,
         on_calibrated=on_calibrated,
         find_window=lambda t=title: find_window(t),

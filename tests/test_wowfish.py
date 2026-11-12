@@ -125,6 +125,28 @@ def test_bite_detector_hears_each_clip_once():
     assert len(_hear(np.concatenate([gap, clip, apart, clip, gap]))[0]) == 2
 
 
+def test_detector_hears_quiet_splash_without_counting_silence():
+    clip = load_reference_clips(RATE)["fishingbobber_1"] * 0.03
+    silence = np.zeros(RATE, dtype=np.float32)
+    events, _ = _hear(np.concatenate([silence, clip, silence]))
+    assert len(events) == 1
+    assert events[0].clip == "fishingbobber_1"
+
+
+def test_detector_hears_bites_after_each_cast_reset():
+    detector = detector_for(AudioConfig())
+    clip = load_reference_clips(RATE)[CLIP_NAMES[0]]
+    stream = np.concatenate([np.zeros(RATE, dtype=np.float32), clip,
+                             np.zeros(RATE, dtype=np.float32)])
+    for _ in range(2):
+        detector.reset()
+        events = []
+        for i in range(0, len(stream), 2048):
+            part = stream[i:i + 2048]
+            events.extend(detector.feed(AudioChunk(part, RATE, (i + len(part)) / RATE)))
+        assert len(events) == 1
+
+
 def test_bite_detector_stays_quiet_on_silence_and_noise():
     """Nothing fires on silence or broadband noise, and the scores stay well under threshold."""
     threshold = AudioConfig().bite_threshold

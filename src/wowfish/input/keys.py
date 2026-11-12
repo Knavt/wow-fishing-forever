@@ -8,10 +8,11 @@ import string
 _LETTERS = tuple(string.ascii_lowercase)
 _DIGITS = tuple(string.digits)
 _FKEYS = tuple(f"f{i}" for i in range(1, 13))
+_NUMPAD = tuple(f"num{i}" for i in range(10))
 _NAMED = ("space", "enter", "tab", "escape")
 _PUNCT = ("-", "=", "[", "]", ";", "'", ",", ".", "/", "`", "\\")
 
-SUPPORTED_KEYS: tuple[str, ...] = _LETTERS + _DIGITS + _FKEYS + _NAMED + _PUNCT
+SUPPORTED_KEYS: tuple[str, ...] = _LETTERS + _DIGITS + _FKEYS + _NUMPAD + _NAMED + _PUNCT
 
 _X11_SPECIAL = {
     "space": "space",
@@ -34,6 +35,7 @@ X11_NAMES: dict[str, str] = {
     **{k: k for k in _LETTERS},
     **{k: k for k in _DIGITS},
     **{k: k.upper() for k in _FKEYS},
+    **{f"num{i}": f"KP_{i}" for i in range(10)},
     **_X11_SPECIAL,
 }
 
@@ -41,6 +43,7 @@ X11_NAMES: dict[str, str] = {
 KEYSYMS: dict[str, int] = {
     **{k: ord(k) for k in _LETTERS + _DIGITS + _PUNCT},
     **{f"f{i}": 0xFFBE + i - 1 for i in range(1, 13)},
+    **{f"num{i}": 0xFFB0 + i for i in range(10)},
     "space": 0x20,
     "enter": 0xFF0D,
     "tab": 0xFF09,
@@ -68,12 +71,15 @@ VK_CODES: dict[str, int] = {
     **{k: ord(k.upper()) for k in _LETTERS},
     **{k: ord(k) for k in _DIGITS},
     **{f"f{i}": 0x70 + i - 1 for i in range(1, 13)},
+    **{f"num{i}": 0x60 + i for i in range(10)},
     **_VK_SPECIAL,
 }
 
 # macOS virtual keycodes (kVK_ANSI_* and friends in Carbon's Events.h). Like Windows scan codes
 # they name a key position on a US ANSI keyboard, not the character it types.
 MAC_KEYCODES: dict[str, int] = {
+    **dict(zip((f"num{i}" for i in range(10)),
+               (0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5B, 0x5C), strict=True)),
     **dict(zip("asdfhgzxcv", range(0x00, 0x0A), strict=True)),
     **dict(zip("bqwerty", range(0x0B, 0x12), strict=True)),
     "1": 0x12, "2": 0x13, "3": 0x14, "4": 0x15, "6": 0x16, "5": 0x17, "=": 0x18, "9": 0x19,

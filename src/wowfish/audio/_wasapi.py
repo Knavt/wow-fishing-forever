@@ -11,9 +11,9 @@ touches Windows; the layouts, the sample conversion and the read loop run anywhe
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import sys
 import threading
-import time
 from ctypes import POINTER, Structure, Union, byref, c_ubyte, c_uint16, c_uint32, c_ulong, c_void_p
 
 import numpy as np
@@ -180,16 +180,13 @@ class ProcessLoopbackSource:
         self._backend.close()  # type: ignore[attr-defined]
 
     def read(self, n_frames: int) -> np.ndarray:
-        waited = 0.0
         while len(self._pending) < n_frames:
             packet = self._backend.read_packet()  # type: ignore[attr-defined]
             if packet is None:
-                if waited >= self.timeout_s:
-                    raise RuntimeError(f"no audio from process {self.pid} for {self.timeout_s:g} s")
-                time.sleep(0.005)
-                waited += 0.005
+                self._pending = np.concatenate(
+                    [self._pending, np.zeros(n_frames - len(self._pending), dtype=np.float32)]
+                )
                 continue
-            waited = 0.0
             raw = self._leftover + packet
             usable = len(raw) // 8 * 8  # two stereo int16 frames per output sample
             self._leftover = raw[usable:]
@@ -268,6 +265,10 @@ class _ComLoopback:
         ole32 = ctypes.windll.ole32  # type: ignore[attr-defined]
         mmdevapi = ctypes.windll.Mmdevapi  # type: ignore[attr-defined]
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.CreateEventW.restype = c_void_p
+        kernel32.CreateEventW.argtypes = [c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_wchar_p]
+        kernel32.CloseHandle.argtypes = [c_void_p]
+        kernel32.WaitForSingleObject.argtypes = [c_void_p, c_uint32]
         hr = ole32.CoInitializeEx(None, 0)  # COINIT_MULTITHREADED
         if hr not in (S_OK, 1) and (hr & 0xFFFFFFFF) != RPC_E_CHANGED_MODE:
             _check(hr, "CoInitializeEx")

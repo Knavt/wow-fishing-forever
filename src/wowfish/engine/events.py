@@ -72,6 +72,7 @@ class Listening(Event):
     best_clip: str  # "" when nothing has scored yet
     best_score: float  # -1.0 when nothing has scored yet
     threshold: float  # the bite_threshold the detector is comparing against
+    level_dbfs: float | None = None
 
 
 @dataclass(frozen=True)

@@ -33,6 +33,7 @@ class GameConfig:
     cast_key: str = "1"
     interact_key: str = "f"
     session_minutes: int = 0
+    mode: str = "addon"  # addon: listen only; classic: cast and track the bobber
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,7 @@ def _validate(path: Path, cfg: Config) -> None:
             raise ConfigError(path, f"{key} {rule}")
 
     check(cfg.game.session_minutes >= 0, "game.session_minutes", "must be 0 (forever) or positive")
+    check(cfg.game.mode in ("addon", "classic"), "game.mode", 'must be "addon" or "classic"')
     v, a = cfg.vision, cfg.audio
     check(0.0 < v.icon_threshold <= 1.0, "vision.icon_threshold", "must be in (0, 1]")
     check(v.match_width >= 320, "vision.match_width", "must be at least 320")
